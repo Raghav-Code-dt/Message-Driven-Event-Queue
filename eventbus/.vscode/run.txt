@@ -1,5 +1,0 @@
-g++ src/broker.cpp -std=gnu++17 -O2 -lws2_32 -Iinclude -o broker.exe
-
-g++ src/broker.cpp -std=gnu++17 -O2 -lws2_32 -Iinclude -o broker.exe
-
-g++ src/*.cpp -std=gnu++17 -O2 -lws2_32 -Iinclude -o eventbus.exe

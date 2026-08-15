@@ -1,24 +1,36 @@
-/dashboard/node_modules
-/gateway/node_modules
-/ecommerce-sim/backend/node_modules
-/MicroServices/payment-service/node_modules
-/MicroServices/shipping-service/node_modules
-/MicroServices/analytics-service/node_modules
-/MicroServices/recommendation-service/node_modules
+# ── Node.js ───────────────────────────────────────────────────────────────────
+node_modules/
+.npm/
+
+# ── C++ Build artifacts ───────────────────────────────────────────────────────
+broker/build/
+broker/*.exe
+*.exe
+*.o
+*.a
+
+# ── Runtime data ──────────────────────────────────────────────────────────────
+data/
+*.wal
+
+# ── Environment ───────────────────────────────────────────────────────────────
+.env
+.env.local
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/c_cpp_properties.json
+.vscode/settings.json
+.DS_Store
+Thumbs.db
+
+# ── C++ vendor headers (gitignored per original .gitignore) ──────────────────
 eventbus/include/httplib.h
+eventbus/include/json.hpp
 eventbus2/include/json.hpp
 eventbus2/include/httplib.h
-eventbus/include/json.hpp
+
+# ── Legacy binaries ───────────────────────────────────────────────────────────
 eventbus2/bus.exe
 eventbus/broker.exe
 eventbus2/broker.exe
 eventbus2/eventbus.exe
-gateway/package-lock.json
-dashboard/package-lock.json
-ecommerce-sim/backend/package-lock.json
-ecommerce-sim/frontend/package-lock.json
-MicroServices/payment-service/package-lock.json
-MicroServices/shipping-service/package-lock.json
-MicroServices/analytics-service/package-lock.json
-MicroServices/recommendation-service/package-lock.json
-.vscode/c_cpp_properties.json
