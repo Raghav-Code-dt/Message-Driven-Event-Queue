@@ -1,16 +1,15 @@
 {
-  "name": "gateway",
-  "version": "1.0.0",
-  "main": "index.js",
+  "name": "mq-gateway",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "TCP-to-WebSocket gateway for the C++ Pub-Sub Broker",
+  "main": "src/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev":   "node src/index.js",
+    "start": "node src/index.js"
   },
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
-    "express": "^5.1.0",
-    "node-fetch": "^3.3.2",
-    "socket.io": "^4.8.1"
+    "dotenv": "^16.4.5",
+    "ws":     "^8.18.0"
   }
 }
