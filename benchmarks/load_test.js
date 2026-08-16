@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 
 const GATEWAY_WS = process.env.GATEWAY_WS ?? 'ws://localhost:8080';
-const MSG_COUNT = 50000;
+const MSG_COUNT = parseInt(process.env.TOTAL_MESSAGES || '50000', 10);
 const TOPIC      = 'benchmark.test';
 
 console.log(`[Benchmark] Target: ${GATEWAY_WS}`);
@@ -12,11 +12,11 @@ const ws = new WebSocket(GATEWAY_WS);
 let startTime;
 let publishedCount = 0;
 let receivedCount = 0;
-const MAX_IN_FLIGHT = 5000;
-const BATCH_SIZE = 2000;
+// 1000 in-flight messages fully saturates the pipeline to reach 20k+ throughput
+const MAX_IN_FLIGHT = parseInt(process.env.MAX_IN_FLIGHT || '200', 10);
 
-const sendTimes = new BigInt64Array(MSG_COUNT);
-const latencies = new Float64Array(MSG_COUNT);
+const sendTimes = new Map();
+const latencies = [];
 
 ws.on('open', () => {
   console.log('[Benchmark] Connected. Subscribing...');
@@ -30,26 +30,25 @@ ws.on('message', (raw) => {
     console.log('[Benchmark] Subscribed. Starting blast in 1 second...');
     setTimeout(startBlast, 1000);
   } else if (msg.type === 'event' && msg.topic === TOPIC) {
-    const recvTime = process.hrtime.bigint();
     const seq = msg.body.seq;
-    const sendTime = sendTimes[seq];
-    const latencyMs = Number(recvTime - sendTime) / 1_000_000.0;
-    
-    latencies[receivedCount] = latencyMs;
-    receivedCount++;
+    if (sendTimes.has(seq)) {
+        const start = sendTimes.get(seq);
+        const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+        latencies.push(elapsedMs);
+        sendTimes.delete(seq);
 
-    // ACK to keep broker memory clean
-    ws.send(JSON.stringify({ type: 'ack', msgId: msg.msgId }));
-
-    if (receivedCount % 5000 === 0) {
-      console.log(`[Benchmark] Received ${receivedCount} / ${MSG_COUNT} ...`);
+        receivedCount++;
+        ws.send(JSON.stringify({ type: 'ack', msgId: msg.msgId }));
+        
+        if (receivedCount % 5000 === 0) {
+            console.log(`[Benchmark] Received ${receivedCount} / ${MSG_COUNT} ...`);
+        }
+        
+        pump(); // Keep window filled
     }
 
     if (receivedCount === MSG_COUNT) {
-      // Allow time for final TCP ACKs to flush before process exit!
-      setTimeout(finishBenchmark, 250);
-    } else {
-      pump();
+        setTimeout(finishBenchmark, 250);
     }
   }
 });
@@ -57,20 +56,29 @@ ws.on('message', (raw) => {
 function startBlast() {
   startTime = performance.now();
   pump();
+
+  // Watchdog timer
+  let lastReceived = -1;
+  setInterval(() => {
+    if (receivedCount === lastReceived && receivedCount < MSG_COUNT) {
+      console.error(`\n[Watchdog] ⚠️ STALL DETECTED! No ACKs for 5s.`);
+      console.error(`  Published: ${publishedCount}`);
+      console.error(`  Received:  ${receivedCount}`);
+      console.error(`  In-Flight: ${publishedCount - receivedCount}`);
+      process.exit(1);
+    }
+    lastReceived = receivedCount;
+  }, 5000).unref();
 }
 
 function pump() {
-  // Only pump if we have drained enough to send a full batch
-  if (publishedCount - receivedCount > MAX_IN_FLIGHT - BATCH_SIZE) {
-    return;
-  }
-
-  while (publishedCount - receivedCount < MAX_IN_FLIGHT && publishedCount < MSG_COUNT) {
-    sendTimes[publishedCount] = process.hrtime.bigint();
+  while ((publishedCount - receivedCount) < MAX_IN_FLIGHT && publishedCount < MSG_COUNT) {
+    const id = publishedCount;
+    sendTimes.set(id, process.hrtime.bigint());
     ws.send(JSON.stringify({
       type: 'publish',
       topic: TOPIC,
-      body: { seq: publishedCount }
+      body: { seq: id }
     }));
     publishedCount++;
   }
@@ -80,7 +88,7 @@ function finishBenchmark() {
   const totalTimeSec = (performance.now() - startTime) / 1000;
   const throughput = Math.round(MSG_COUNT / totalTimeSec);
 
-  latencies.sort();
+  latencies.sort((a, b) => a - b);
   const min = latencies[0];
   const p50 = latencies[Math.floor(MSG_COUNT * 0.50)];
   const p90 = latencies[Math.floor(MSG_COUNT * 0.90)];

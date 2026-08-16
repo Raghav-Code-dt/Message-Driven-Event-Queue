@@ -83,6 +83,12 @@ void TcpServer::accept_loop() {
             break;
         }
 
+        int flag = 1;
+        ::setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&flag), sizeof(int));
+        int buf_size = 256 * 1024;
+        ::setsockopt(client_sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&buf_size), sizeof(int));
+        ::setsockopt(client_sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&buf_size), sizeof(int));
+
         ClientId id = static_cast<ClientId>(client_sock);
         auto conn   = std::make_shared<ClientConn>();
         conn->sock  = client_sock;
@@ -155,7 +161,8 @@ disconnect:
         clients_.erase(id);
     }
     // Notify upper layer that this client is gone (Phase 3: unsubscribe)
-    on_frame_(id, MessageType::ERROR_RESP, 0, {}); // sentinel disconnect event
+    // 0x05 represents ERROR_RESP / Disconnect sentinel
+    on_frame_(id, MessageType::ERROR_RESP, 0, {});
 }
 
 void TcpServer::send_to(ClientId id, const std::vector<uint8_t>& frame) {

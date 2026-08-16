@@ -24,26 +24,32 @@ export default function App() {
   // ---------------------------- SOCKET ----------------------------
   useEffect(() => {
     let reconnectTimer;
+    let isUnmounted = false;
 
     function connect() {
+      if (isUnmounted) return;
+      
       const ws = new WebSocket(GATEWAY_WS);
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (isUnmounted) { ws.close(); return; }
         setStatus("connected");
         // DO NOT subscribe to '*' to prevent crashing the browser during 20k+ benchmarks!
-        ws.send(JSON.stringify({ type: 'subscribe', topic: '$SYS.stats' }));
-        ws.send(JSON.stringify({ type: 'subscribe', topic: 'test.lifecycle' }));
-        ws.send(JSON.stringify({ type: 'subscribe', topic: 'test.dlq' }));
-        ws.send(JSON.stringify({ type: 'subscribe', topic: '$DLQ.*' }));
+        const topics = ['$SYS.stats', 'order.*', 'payment.*', 'notification.*', '$DLQ.*', 'test.*'];
+        topics.forEach((topic) => {
+          ws.send(JSON.stringify({ type: 'subscribe', topic }));
+        });
       };
 
       ws.onclose = () => {
+        if (isUnmounted) return;
         setStatus("disconnected");
         reconnectTimer = setTimeout(connect, 2000);
       };
 
       ws.onmessage = (msgEvent) => {
+        if (isUnmounted) return;
         let e;
         try { e = JSON.parse(msgEvent.data); } catch { return; }
         
@@ -67,7 +73,7 @@ export default function App() {
         // Handle Lifecycle Visualizer Tracking
         if (e.topic === 'test.lifecycle' && e.body?.traceId === testTraceIdRef.current) {
           setTestFlowState("DELIVERED");
-          setTimeout(() => setTestFlowState("ACKED"), 500); // visualize the ack delay
+          setTimeout(() => { if (!isUnmounted) setTestFlowState("ACKED"); }, 500); // visualize the ack delay
         }
 
         if (e.topic === 'test.dlq' && e.body?.traceId === testTraceIdRef.current) {
@@ -98,6 +104,7 @@ export default function App() {
     connect();
 
     return () => {
+      isUnmounted = true;
       clearTimeout(reconnectTimer);
       if (wsRef.current) wsRef.current.close();
     };

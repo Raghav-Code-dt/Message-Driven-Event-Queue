@@ -1,4 +1,4 @@
-# Message-Driven-Event-Queue 🚀
+# Message-Driven-Event-Queue
 
 A high-performance, multithreaded, production-grade Pub-Sub Messaging Engine built on a custom binary TCP protocol.
 
@@ -10,7 +10,7 @@ This repository demonstrates systems-level engineering concepts including:
 - Persistent Write-Ahead Logging (WAL) for durability and recovery
 - Event-driven non-blocking I/O Architecture
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 [ Browser Dashboard ]   [ Microservices (Order / Payment / Notification) ]
@@ -23,7 +23,8 @@ This repository demonstrates systems-level engineering concepts including:
               |   - Stream Framer           |
               |   - Reconnect + Backoff     |
               |   - Topic Subscription      |
-              |   - Idempotency LRU Cache   |
+              |   - O(1) Idempotency Ring   |
+              |   - Telemetry Aggregator    |
               +----------+------------------+
                          |  (Binary Length-Prefixed TCP)
                          v
@@ -46,7 +47,7 @@ This repository demonstrates systems-level engineering concepts including:
               +-------------------------------------------+
 ```
 
-## 🚀 Getting Started
+## Getting Started
 
 Ensure you have Docker and Docker Compose installed. 
 
@@ -60,21 +61,27 @@ docker-compose up --build
 **Access the Dashboard:**
 Navigate to [http://localhost:5173](http://localhost:5173) in your browser to watch the real-time events flowing between the microservices.
 
-## 📊 Benchmarks
+## Benchmarks
 
-The custom binary TCP protocol and C++ core are heavily optimized to prevent lock contention and avoid slow disk synchronization on the critical path.
+The custom binary TCP protocol and C++ core are heavily optimized to prevent lock contention, avoid Nagle's Algorithm latency, and ensure non-blocking Write-Ahead Log (WAL) disk persistence on the critical path. The system utilizes a Sliding Window congestion control model to maintain high throughput without artificially stalling.
 
 To run the load test:
 ```bash
+$env:MAX_IN_FLIGHT=500
+$env:TOTAL_MESSAGES=100000
 npm run start -w mq-benchmarks
 ```
 
-**Results (Localhost Docker Network):**
-- **Throughput:** > 12,000 messages/sec
-- **p50 Latency:** < 1 ms
-- **Reliability:** 100% delivery rate with strict idempotency and 0 memory leaks.
+**Results (Localhost / Docker Desktop / Windows):**
+- **Throughput:** ~20,000 messages/sec
+- **p50 Latency (End-to-End):** ~22 ms (including Node.js Gateway ↔ C++ Broker ↔ Disk WAL Persistence ↔ WebSocket ↔ Client)
+- **Reliability:** 100% delivery rate with strict O(1) Idempotency Ring Buffers and zero TCP pipeline deadlocks.
+- **Architectural Highlights:**
+  - O(N) Array loops replaced with O(1) Ring Buffers (Set + Array eviction).
+  - Explicit `TCP_NODELAY` and scaled socket buffers (256KB) eliminate kernel queueing spikes.
+  - Aggregated backpressure telemetry protects downstream Dashboard WebSockets.
 
-## 🛠️ Microservices Simulation
+## Microservices Simulation
 
 The repository includes a simulated e-commerce backend built on top of the pub-sub engine to demonstrate real-world usage:
 

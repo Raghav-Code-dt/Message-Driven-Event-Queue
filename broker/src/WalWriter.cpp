@@ -77,7 +77,7 @@ void WalWriter::flush_thread_loop() {
     while (running_) {
         {
             std::unique_lock<std::mutex> lock(mu_);
-            cv_.wait_for(lock, std::chrono::milliseconds(5), [this] {
+            cv_.wait_for(lock, std::chrono::milliseconds(2), [this] {
                 return !running_ || active_buf_.size() > 64 * 1024;
             });
 
