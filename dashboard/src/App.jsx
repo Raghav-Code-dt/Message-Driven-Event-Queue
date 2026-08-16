@@ -1,325 +1,268 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { io } from "socket.io-client";
+import React, { useEffect, useState, useRef } from "react";
 import {
-  LineChart, Line, XAxis, YAxis, Tooltip,
-  BarChart, Bar
+  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer
 } from "recharts";
 
-const SOCKET_URL = "http://localhost:5000";
+const GATEWAY_WS = "ws://localhost:8080";
 
 export default function App() {
   const [events, setEvents] = useState([]);
-  const [topics, setTopics] = useState({});
   const [status, setStatus] = useState("connecting");
-
-  const [topicFilter, setTopicFilter] = useState([]);
-  const [paused, setPaused] = useState(false);
-  const [search, setSearch] = useState("");
-
+  const [gatewayStats, setGatewayStats] = useState({ uptime: 0, connections: 0, memoryUsage: 0 });
+  
   const [rateData, setRateData] = useState([]);
   const [lastCount, setLastCount] = useState(0);
 
-  const [selectedEvent, setSelectedEvent] = useState(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Lifecycle Test State
+  const [testTraceId, setTestTraceId] = useState(null);
+  const testTraceIdRef = useRef(null);
+  const [testFlowState, setTestFlowState] = useState("IDLE"); // IDLE, SENT, DELIVERED, ACKED, DELIVERED_NACK, DLQ
+  const [testRetries, setTestRetries] = useState(0);
+
+  const wsRef = useRef(null);
 
   // ---------------------------- SOCKET ----------------------------
   useEffect(() => {
-    const socket = io(SOCKET_URL, { transports: ["websocket"] });
+    let reconnectTimer;
 
-    socket.on("connect", () => setStatus("connected"));
-    socket.on("disconnect", () => setStatus("disconnected"));
+    function connect() {
+      const ws = new WebSocket(GATEWAY_WS);
+      wsRef.current = ws;
 
-    socket.on("event", (evt) => {
-      const evts = Array.isArray(evt) ? evt : [evt];
+      ws.onopen = () => {
+        setStatus("connected");
+        // DO NOT subscribe to '*' to prevent crashing the browser during 20k+ benchmarks!
+        ws.send(JSON.stringify({ type: 'subscribe', topic: '$SYS.stats' }));
+        ws.send(JSON.stringify({ type: 'subscribe', topic: 'test.lifecycle' }));
+        ws.send(JSON.stringify({ type: 'subscribe', topic: 'test.dlq' }));
+        ws.send(JSON.stringify({ type: 'subscribe', topic: '$DLQ.*' }));
+      };
 
-      evts.forEach(e => {
-        if (!e || !e.topic) return;
+      ws.onclose = () => {
+        setStatus("disconnected");
+        reconnectTimer = setTimeout(connect, 2000);
+      };
 
-        const formatted = {
-          ...e,
-          timestamp: e.timestamp || Date.now(),
-          payload: typeof e.payload === "object"
-            ? JSON.stringify(e.payload)
-            : e.payload,
-        };
-
-        if (!paused) {
-          setEvents(prev => [formatted, ...prev].slice(0, 200));
+      ws.onmessage = (msgEvent) => {
+        let e;
+        try { e = JSON.parse(msgEvent.data); } catch { return; }
+        
+        if (e.type === 'status') {
+          console.log('Broker status:', e.status);
+          return;
         }
 
-        setTopics(prev => ({
-          ...prev,
-          [e.topic]: (prev[e.topic] || 0) + 1,
-        }));
-      });
-    });
+        if (e.type !== 'event') return;
 
-    return () => socket.disconnect();
-  }, [paused]);
+        // Handle Gateway Stats
+        if (e.topic === '$SYS.stats') {
+          setGatewayStats(e.body);
+          setRateData(p => [...p.slice(-40), { 
+            t: new Date().toLocaleTimeString(), 
+            msgPerSec: e.body.msgPerSec || 0 
+          }]);
+          return; // don't clutter event stream
+        }
 
-  // ---------------------------- METRICS ----------------------------
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const diff = events.length - lastCount;
-      setLastCount(events.length);
+        // Handle Lifecycle Visualizer Tracking
+        if (e.topic === 'test.lifecycle' && e.body?.traceId === testTraceIdRef.current) {
+          setTestFlowState("DELIVERED");
+          setTimeout(() => setTestFlowState("ACKED"), 500); // visualize the ack delay
+        }
 
-      setRateData(p => [...p.slice(-20), { t: Date.now(), v: Math.max(diff, 0) }]);
-    }, 1000);
+        if (e.topic === 'test.dlq' && e.body?.traceId === testTraceIdRef.current) {
+          setTestFlowState(prev => prev === "SENT" ? "DELIVERED_NACK" : prev);
+          setTestRetries(prev => prev + 1);
+        }
 
-    return () => clearInterval(timer);
-  }, [events, lastCount]);
+        if (e.topic === '$DLQ.test.dlq' && e.body?.traceId === testTraceIdRef.current) {
+          setTestFlowState("DLQ");
+        }
 
-  // ---------------------------- HELPERS ----------------------------
-  const sortedTopics = useMemo(
-    () => Object.entries(topics).sort((a, b) => b[1] - a[1]),
-    [topics]
-  );
+        // Auto-ack everything EXCEPT test.dlq messages
+        if (e.topic !== 'test.dlq') {
+          ws.send(JSON.stringify({ type: 'ack', msgId: e.msgId }));
+        }
 
-  const searchLower = search.toLowerCase().trim();
+        const formatted = {
+          id: e.msgId,
+          topic: e.topic,
+          timestamp: e.body?.timestamp || Date.now(),
+          payload: typeof e.body === "object" ? JSON.stringify(e.body) : e.body,
+        };
 
-  const topTopics = sortedTopics.slice(0, 3).map(([t]) => t);
-  const otherTopics = sortedTopics.slice(3)
-    .filter(([t]) => t.toLowerCase().includes(searchLower));
+        setEvents(prev => [formatted, ...prev].slice(0, 100)); // Keep stream fast
+      };
+    }
 
-  const toggleTopic = (t) => {
-    setTopicFilter(prev =>
-      prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]
-    );
+    connect();
+
+    return () => {
+      clearTimeout(reconnectTimer);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, []); // Empty dependency array ensures WebSocket stays open permanently!
+
+  // ---------------------------- ACTIONS ----------------------------
+  const startTestAck = () => {
+    const tid = Math.random().toString(36).substring(7);
+    setTestTraceId(tid);
+    testTraceIdRef.current = tid;
+    setTestFlowState("SENT");
+    setTestRetries(0);
+    wsRef.current?.send(JSON.stringify({
+      type: 'publish',
+      topic: 'test.lifecycle',
+      body: { traceId: tid, message: "Hello Reliable Queue!" }
+    }));
   };
 
-  const filteredEvents = events.filter(e => {
-    const topicMatch = topicFilter.length === 0 || topicFilter.includes(e.topic);
-    const searchMatch = e.topic.toLowerCase().includes(searchLower);
-    return topicMatch && searchMatch;
-  });
-
-  const clearAll = () => {
-    setEvents([]);
-    setTopics({});
-    setTopicFilter([]);
-    setLastCount(0);
-    setRateData([]);
-  };
-
-  const download = (blob, filename) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const exportJSON = () =>
-    download(new Blob([JSON.stringify(events, null, 2)], { type: "application/json" }), "events.json");
-
-  const exportCSV = () => {
-    const header = "id,topic,payload\n";
-    const rows = events
-      .map(e => `${e.id},${e.topic},${JSON.stringify(e.payload)}`)
-      .join("\n");
-    download(new Blob([header + rows], { type: "text/csv" }), "events.csv");
+  const startTestDlq = () => {
+    const tid = Math.random().toString(36).substring(7);
+    setTestTraceId(tid);
+    testTraceIdRef.current = tid;
+    setTestFlowState("SENT");
+    setTestRetries(0);
+    wsRef.current?.send(JSON.stringify({
+      type: 'publish',
+      topic: 'test.dlq',
+      body: { traceId: tid, message: "Poison Pill!" }
+    }));
   };
 
   // ---------------------------- UI ----------------------------
   return (
-    <div className="p-6 max-w-7xl mx-auto text-white space-y-6">
+    <div className="min-h-screen bg-[#0d1117] text-gray-200 p-6 font-sans antialiased">
+      <div className="max-w-7xl mx-auto space-y-6">
 
-      {/* HEADER */}
-      <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">EventBus Dashboard</h1>
-        <span className={`px-3 py-1 rounded text-sm ${
-          status === "connected" ? "bg-emerald-600" : "bg-red-600"
-        }`}>
-          {status}
-        </span>
-      </header>
+        {/* HEADER */}
+        <header className="flex items-center justify-between pb-4 border-b border-gray-800">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight text-white">Observability</h1>
+            <p className="text-gray-500 text-sm mt-1">Real-time metrics & stream monitoring</p>
+          </div>
+          <div className="flex gap-4">
+            <HealthBadge label="Gateway" status={status === "connected"} />
+            <div className="flex flex-col text-right">
+              <span className="text-xs text-gray-500 uppercase tracking-wider">Gateway Uptime</span>
+              <span className="text-sm font-mono text-gray-300">{gatewayStats.uptime.toFixed(0)}s</span>
+            </div>
+            <div className="flex flex-col text-right pl-4 border-l border-gray-800">
+              <span className="text-xs text-gray-500 uppercase tracking-wider">Active WS</span>
+              <span className="text-sm font-mono text-gray-300">{gatewayStats.connections} clients</span>
+            </div>
+          </div>
+        </header>
 
-      {/* CONTROLS */}
-      <div className="flex gap-3 items-center flex-wrap">
+        {/* TOP METRICS & LIFECYCLE GRID */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          {/* THROUGHPUT CHART */}
+          <div className="lg:col-span-2 bg-[#161b22] border border-gray-800 rounded-xl p-5 shadow-sm">
+            <h2 className="text-sm font-semibold text-gray-400 mb-4 uppercase tracking-wider">Throughput (msg/s)</h2>
+            <div className="h-[200px] w-full">
+              <ResponsiveContainer>
+                <AreaChart data={rateData}>
+                  <defs>
+                    <linearGradient id="colorRate" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#238636" stopOpacity={0.4}/>
+                      <stop offset="95%" stopColor="#238636" stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: '#0d1117', borderColor: '#30363d', color: '#c9d1d9' }}
+                    itemStyle={{ color: '#2ea043' }}
+                  />
+                  <Area type="monotone" dataKey="msgPerSec" stroke="#2ea043" strokeWidth={2} fillOpacity={1} fill="url(#colorRate)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
 
-        <button onClick={() => setPaused(p=>!p)}
-          className={`px-3 py-1 rounded text-sm ${
-            paused ? "bg-yellow-600" : "bg-emerald-600"
-          }`}>
-          {paused ? "Resume" : "Pause"}
-        </button>
+          {/* LIFECYCLE PLAYGROUND */}
+          <div className="bg-[#161b22] border border-gray-800 rounded-xl p-5 shadow-sm flex flex-col">
+            <h2 className="text-sm font-semibold text-gray-400 mb-4 uppercase tracking-wider">Lifecycle Playground</h2>
+            
+            <div className="flex gap-2 mb-6">
+              <button onClick={startTestAck} className="flex-1 bg-[#238636] hover:bg-[#2ea043] text-white py-2 rounded text-sm font-medium transition-colors">
+                Test ACK Flow
+              </button>
+              <button onClick={startTestDlq} className="flex-1 bg-[#da3633] hover:bg-[#f85149] text-white py-2 rounded text-sm font-medium transition-colors">
+                Test DLQ Flow
+              </button>
+            </div>
 
-        <button onClick={clearAll} className="px-3 py-1 rounded text-sm bg-red-600">
-          Clear
-        </button>
+            <div className="flex-1 flex flex-col justify-center space-y-4">
+              <FlowStep label="Published to Gateway" active={testFlowState !== "IDLE"} />
+              <FlowStep label="Broker Delivered" active={["DELIVERED", "ACKED", "DELIVERED_NACK", "DLQ"].includes(testFlowState)} 
+                meta={testRetries > 0 ? `(Attempt ${testRetries}/5)` : null} />
+              
+              {testFlowState === "DELIVERED_NACK" || testFlowState === "DLQ" ? (
+                <FlowStep label="Moved to Dead Letter Queue" active={testFlowState === "DLQ"} color="red" />
+              ) : (
+                <FlowStep label="Acknowledged (ACK)" active={testFlowState === "ACKED"} color="green" />
+              )}
+            </div>
+          </div>
+        </div>
 
-        <button onClick={exportJSON} className="px-3 py-1 rounded bg-blue-600 text-sm">
-          Export JSON
-        </button>
-        <button onClick={exportCSV} className="px-3 py-1 rounded bg-purple-600 text-sm">
-          Export CSV
-        </button>
-
-        <input
-          value={search}
-          onChange={(e)=>setSearch(e.target.value)}
-          placeholder="Search topics..."
-          className="px-3 py-1 bg-gray-800 border border-gray-700 rounded text-sm w-56"
-        />
-
-        <button
-          onClick={()=>setSidebarOpen(true)}
-          className="px-3 py-1 rounded bg-indigo-600 text-sm"
-        >
-          Stats →
-        </button>
-      </div>
-
-      {/* CHARTS */}
-      <section className="grid grid-cols-2 gap-4">
-        <ChartCard title="Messages / Sec">
-          <LineChart width={300} height={150} data={rateData}>
-            <Line dataKey="v" stroke="#4ade80" strokeWidth={2} dot={false}/>
-            <XAxis hide/><YAxis hide/><Tooltip/>
-          </LineChart>
-        </ChartCard>
-
-        <ChartCard title="Topic Frequency">
-          <BarChart width={300} height={150} data={sortedTopics.map(([name,count])=>({name,count}))}>
-            <Bar dataKey="count" fill="#6366f1"/>
-            <XAxis dataKey="name"/><YAxis/><Tooltip/>
-          </BarChart>
-        </ChartCard>
-      </section>
-
-      {/* STATS */}
-      <section className="grid grid-cols-3 gap-4">
-        <StatCard title="Events">{filteredEvents.length}</StatCard>
-        <StatCard title="Topics">{sortedTopics.length}</StatCard>
-        <StatCard title="Top Topic">{sortedTopics[0]?.[0] || "-"}</StatCard>
-      </section>
-
-      {/* TOPICS + EVENTS */}
-      <section className="grid grid-cols-3 gap-4">
-
-        {/* TOPICS */}
-        <div className="col-span-1 space-y-3">
-          <h2 className="text-lg font-medium">Topics</h2>
-
-          <div className="bg-gray-900 rounded-xl p-3 border border-gray-700 max-h-[380px] overflow-auto">
-            {[...topTopics, ...otherTopics.map(x=>x[0])].map(name => (
-              <div key={name}
-                onClick={()=>toggleTopic(name)}
-                className={`flex justify-between py-1 px-2 text-sm border-b border-gray-800 cursor-pointer ${
-                  topicFilter.includes(name)
-                    ? "bg-emerald-700/40 text-emerald-300"
-                    : "text-gray-300"
-                }`}>
-                <span>{name}</span><span>{topics[name]}</span>
+        {/* LIVE STREAM TERMINAL */}
+        <div className="bg-[#161b22] border border-gray-800 rounded-xl shadow-sm overflow-hidden flex flex-col h-[500px]">
+          <div className="bg-[#0d1117] border-b border-gray-800 px-4 py-3 flex justify-between items-center">
+            <div className="flex items-center gap-2">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500"></div>
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500"></div>
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500"></div>
+              <span className="ml-3 text-xs font-mono text-gray-500">broker_stream_tail</span>
+            </div>
+            <span className="text-xs font-mono text-gray-500">{events.length} events buffered</span>
+          </div>
+          
+          <div className="flex-1 p-4 overflow-y-auto font-mono text-[13px] leading-relaxed space-y-1">
+            {events.length === 0 && <div className="text-gray-600">Waiting for messages...</div>}
+            {events.map((e, i) => (
+              <div key={i} className="flex gap-4 group hover:bg-[#0d1117] px-2 py-0.5 rounded transition-colors">
+                <span className="text-gray-600 shrink-0">{new Date(e.timestamp).toISOString().split('T')[1].replace('Z','')}</span>
+                <span className={`shrink-0 w-32 truncate ${e.topic.startsWith('$DLQ') ? 'text-red-400' : 'text-blue-400'}`}>
+                  [{e.topic}]
+                </span>
+                <span className="text-gray-400 truncate group-hover:text-gray-200 transition-colors">
+                  {e.payload}
+                </span>
               </div>
             ))}
           </div>
         </div>
 
-        {/* EVENTS LIST */}
-        <div className="col-span-2">
-          <h2 className="text-lg font-medium mb-2">Events</h2>
-
-          <div className="bg-gray-900 rounded-xl p-3 border border-gray-700 max-h-[400px] overflow-auto">
-            {filteredEvents.map((e,i)=>{
-              let parsed;
-              try { parsed = JSON.parse(e.payload); } catch { parsed = e.payload; }
-
-              return (
-                <div key={i}
-                  onClick={()=>setSelectedEvent(e)}
-                  className="relative p-4 mb-3 bg-gray-900/80 border border-gray-800 rounded-lg cursor-pointer hover:bg-gray-800/80 transition">
-
-                  <div className="absolute left-3 top-2 text-[10px] text-gray-500">
-                    {new Date(e.timestamp).toLocaleString()}
-                  </div>
-
-                  <div className="flex items-center gap-2 mt-4 mb-2">
-                    <span className="px-2 py-0.5 text-xs rounded bg-indigo-600 font-medium">
-                      {e.topic}
-                    </span>
-
-                    <span className="px-2 py-0.5 text-[10px] rounded bg-emerald-700 text-white">
-                      PUB: {e.service || "unknown"}
-                    </span>
-
-                    <span className="px-2 py-0.5 text-[10px] rounded bg-gray-700 text-gray-300">
-                      SUB: {e.topic.startsWith("inventory") ? "ecomm" : "ALL"}
-                    </span>
-                  </div>
-
-                  <pre className="text-xs text-green-300 whitespace-pre-wrap leading-5 bg-black/30 p-2 rounded">
-                    {typeof parsed === "object"
-                      ? JSON.stringify(parsed, null, 2)
-                      : parsed}
-                  </pre>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </section>
-
-      <JsonModal event={selectedEvent} onClose={()=>setSelectedEvent(null)}/>
-      <Sidebar open={sidebarOpen} onClose={()=>setSidebarOpen(false)} topics={sortedTopics} events={events} topicFilter={topicFilter}/>
-    </div>
-  );
-}
-
-/* ---------------- COMPONENTS ---------------- */
-
-function StatCard({title,children}) {
-  return (
-    <div className="bg-gray-900 rounded-xl p-4 border border-gray-700">
-      <div className="text-gray-400 text-sm">{title}</div>
-      <div className="text-2xl font-semibold">{children}</div>
-    </div>
-  );
-}
-
-function ChartCard({title,children}) {
-  return (
-    <div className="bg-gray-900 rounded-xl p-4 border border-gray-700 space-y-2">
-      <div className="text-gray-400 text-sm">{title}</div>
-      {children}
-    </div>
-  );
-}
-
-function JsonModal({event,onClose}) {
-  if (!event) return null;
-  let parsed;
-  try { parsed = JSON.parse(event.payload); } catch { parsed = event.payload; }
-
-  return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div className="bg-gray-900 p-4 rounded-xl border border-gray-700 shadow-xl w-[450px] max-h-[80vh] overflow-auto">
-        <div className="flex justify-between mb-2">
-          <h3 className="font-semibold text-lg">Event Details</h3>
-          <button onClick={onClose} className="text-red-400">✕</button>
-        </div>
-        <pre className="bg-black/40 p-3 rounded text-green-300 text-xs">
-          <b className="text-emerald-400">Topic:</b> {event.topic}
-          {"\n"}<b className="text-blue-400">Timestamp:</b> {new Date(event.timestamp).toLocaleString()}
-          {"\n"}<b className="text-purple-400">Publisher:</b> {event.service || "unknown"}
-          {"\n\n"}<b className="text-emerald-300">Payload:</b>{"\n"}
-          {JSON.stringify(parsed, null, 2)}
-        </pre>
       </div>
     </div>
   );
 }
 
-function Sidebar({open,onClose,topics,events,topicFilter}) {
+// --- Micro Components ---
+
+function HealthBadge({ label, status }) {
   return (
-    <div className={`fixed right-0 top-0 h-full w-80 bg-gray-900 border-l border-gray-700 p-4 z-40 transition-transform duration-300 ${
-      open ? "translate-x-0" : "translate-x-full"
-    }`}>
-      <button onClick={onClose} className="mb-3 text-red-400">✕ Close</button>
-      <h2 className="font-semibold text-lg mb-2">Live Stats</h2>
-      <div className="text-sm space-y-2">
-        <div>Events: <b>{events.length}</b></div>
-        <div>Topics: <b>{topics.length}</b></div>
-        <div>Filters: <b>{topicFilter.join(", ") || "-"}</b></div>
+    <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#161b22] border border-gray-800">
+      <div className={`w-2 h-2 rounded-full ${status ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500'}`}></div>
+      <span className="text-xs font-medium text-gray-300">{label}</span>
+    </div>
+  );
+}
+
+function FlowStep({ label, active, color = "blue", meta }) {
+  const dotColor = active 
+    ? (color === "green" ? "bg-green-500" : color === "red" ? "bg-red-500" : "bg-blue-500")
+    : "bg-gray-700";
+    
+  return (
+    <div className="flex items-center gap-4">
+      <div className={`w-3 h-3 rounded-full ${dotColor} transition-colors duration-500 relative`}>
+        {active && <div className={`absolute inset-0 rounded-full animate-ping opacity-75 ${dotColor}`}></div>}
+      </div>
+      <div className={`text-sm ${active ? 'text-white font-medium' : 'text-gray-500'} transition-colors duration-500 flex gap-2 items-center`}>
+        {label}
+        {meta && <span className="text-xs text-yellow-500 font-mono">{meta}</span>}
       </div>
     </div>
   );

@@ -80,9 +80,8 @@ inline std::vector<uint8_t> encode_frame(MessageType type,
     frame.insert(frame.end(), pi, pi + 8);
 
     // Topic length (2 bytes BE)
-    uint16_t tlen_be = (topic_len >> 8) | (topic_len << 8);
-    frame.push_back(static_cast<uint8_t>(tlen_be >> 8));
-    frame.push_back(static_cast<uint8_t>(tlen_be & 0xFF));
+    frame.push_back(static_cast<uint8_t>(topic_len >> 8));
+    frame.push_back(static_cast<uint8_t>(topic_len & 0xFF));
 
     // Topic bytes
     frame.insert(frame.end(), topic.begin(), topic.end());

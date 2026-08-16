@@ -8,6 +8,8 @@
 #  define CLOSE_SOCK(s) ::closesocket(s)
 #  define SOCK_ERR      WSAGetLastError()
 #else
+#  include <netinet/tcp.h>
+#  include <sys/socket.h>
 #  define CLOSE_SOCK(s) ::close(s)
 #  define SOCK_ERR      errno
 #endif

@@ -5,6 +5,8 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
+#include <queue>
+#include <vector>
 #include "Message.hpp"
 #include "SafeQueue.hpp"
 
@@ -50,6 +52,11 @@ private:
     std::chrono::milliseconds               ack_timeout_;
     int                                     max_retries_;
     std::unordered_map<uint64_t, InFlight>  in_flight_;
+    
+    using TimePoint = std::chrono::steady_clock::time_point;
+    using DeadlineEntry = std::pair<TimePoint, uint64_t>;
+    std::priority_queue<DeadlineEntry, std::vector<DeadlineEntry>, std::greater<DeadlineEntry>> deadlines_;
+
     std::mutex                              mu_;
     std::atomic<bool>                       running_{true};
     std::thread                             scanner_thread_;

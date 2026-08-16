@@ -34,6 +34,9 @@ export class WsServer {
   // Map: topic_pattern → Set<ws>  (reverse index for dispatch)
   #topicClients = new Map();
 
+  #statsTimer = null;
+  #msgCount = 0;
+
   constructor(port, tcpClient) {
     this.#port = port;
     this.#tcp  = tcpClient;
@@ -66,6 +69,7 @@ export class WsServer {
     // ── Route incoming TCP frames to WS clients ───────────────────────────
     this.#tcp.on('frame', ({ type, msgId, payload }) => {
       if (type === MsgType.EVENT_DATA) {
+        this.#msgCount++;
         const { topic, body } = decodeEventPayload(payload);
         this.#dispatchEvent(topic, msgId, body);
       } else if (type === MsgType.HEARTBEAT) {
@@ -82,9 +86,25 @@ export class WsServer {
     this.#tcp.on('disconnect', () => {
       this.#broadcastStatus('broker_disconnected');
     });
+
+    // Broadcast telemetry every 1 second
+    this.#statsTimer = setInterval(() => {
+      if (!this.#wss) return;
+      const stats = {
+        uptime: process.uptime(),
+        connections: this.#wss.clients.size,
+        memoryUsage: process.memoryUsage().rss,
+        msgPerSec: this.#msgCount
+      };
+      this.#msgCount = 0; // reset for next second
+
+      // Dispatch locally to all WS clients subscribed to $SYS.stats
+      this.#dispatchEvent('$SYS.stats', 0n, Buffer.from(JSON.stringify(stats)));
+    }, 1000);
   }
 
   stop() {
+    clearInterval(this.#statsTimer);
     this.#wss?.close();
   }
 
@@ -153,7 +173,31 @@ export class WsServer {
     ws.send(JSON.stringify({ type: 'subscribed', topic, group }));
   }
 
+  // O(1) Ring buffer for idempotency
+  #recentMsgIds = new Set();
+  #recentMsgIdRing = new Array(50000);
+  #ringIndex = 0;
+  #ringCount = 0;
+
   #dispatchEvent(topic, msgId, body) {
+    const idStr = msgId.toString();
+
+    // Idempotency check: drop duplicate packages, bypass for telemetry
+    if (topic !== '$SYS.stats') {
+      if (this.#recentMsgIds.has(idStr)) return;
+
+      if (this.#ringCount === 50000) {
+        const oldest = this.#recentMsgIdRing[this.#ringIndex];
+        this.#recentMsgIds.delete(oldest);
+      } else {
+        this.#ringCount++;
+      }
+
+      this.#recentMsgIds.add(idStr);
+      this.#recentMsgIdRing[this.#ringIndex] = idStr;
+      this.#ringIndex = (this.#ringIndex + 1) % 50000;
+    }
+
     let dispatched = 0;
 
     // Parse body bytes to JSON if possible, otherwise keep as string
@@ -167,7 +211,7 @@ export class WsServer {
     const envelope = JSON.stringify({
       type:  'event',
       topic,
-      msgId: msgId.toString(),   // BigInt → string (JSON-safe)
+      msgId: idStr,
       body:  parsedBody,
     });
 
@@ -182,7 +226,7 @@ export class WsServer {
     }
 
     if (dispatched > 0) {
-      console.log(`[WS] Dispatched topic=${topic} msgId=${msgId} to ${dispatched} client(s)`);
+      // console.log(`[WS] Dispatched topic=${topic} msgId=${msgId} to ${dispatched} client(s)`);
     }
   }
 

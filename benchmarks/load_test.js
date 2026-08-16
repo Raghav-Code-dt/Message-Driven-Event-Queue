@@ -10,7 +10,12 @@ console.log(`[Benchmark] Messages: ${MSG_COUNT.toLocaleString()}`);
 const ws = new WebSocket(GATEWAY_WS);
 
 let startTime;
+let publishedCount = 0;
 let receivedCount = 0;
+const MAX_IN_FLIGHT = 5000;
+const BATCH_SIZE = 2000;
+
+const sendTimes = new BigInt64Array(MSG_COUNT);
 const latencies = new Float64Array(MSG_COUNT);
 
 ws.on('open', () => {
@@ -25,11 +30,12 @@ ws.on('message', (raw) => {
     console.log('[Benchmark] Subscribed. Starting blast in 1 second...');
     setTimeout(startBlast, 1000);
   } else if (msg.type === 'event' && msg.topic === TOPIC) {
-    const now = performance.now();
-    const sendTime = msg.body.ts;
-    const latency = now - sendTime;
+    const recvTime = process.hrtime.bigint();
+    const seq = msg.body.seq;
+    const sendTime = sendTimes[seq];
+    const latencyMs = Number(recvTime - sendTime) / 1_000_000.0;
     
-    latencies[receivedCount] = latency;
+    latencies[receivedCount] = latencyMs;
     receivedCount++;
 
     // ACK to keep broker memory clean
@@ -40,35 +46,34 @@ ws.on('message', (raw) => {
     }
 
     if (receivedCount === MSG_COUNT) {
-      finishBenchmark();
+      // Allow time for final TCP ACKs to flush before process exit!
+      setTimeout(finishBenchmark, 250);
+    } else {
+      pump();
     }
   }
 });
 
-async function startBlast() {
+function startBlast() {
   startTime = performance.now();
-  
-  // Blast messages in batches so we don't blow up the Node.js memory buffer
-  const BATCH_SIZE = 1000;
-  
-  for (let i = 0; i < MSG_COUNT; i += BATCH_SIZE) {
-    for (let j = 0; j < BATCH_SIZE && i + j < MSG_COUNT; j++) {
-      ws.send(JSON.stringify({
-        type: 'publish',
-        topic: TOPIC,
-        body: { ts: performance.now(), seq: i + j }
-      }));
-    }
-    
-    // Application-level backpressure: 
-    // Don't let in-flight messages exceed 5000, otherwise the broker's 
-    // 5-second ACK timeout will kick in and cause endless requeues!
-    while ((i + BATCH_SIZE) - receivedCount > 5000) {
-      await new Promise(r => setTimeout(r, 10));
-    }
+  pump();
+}
+
+function pump() {
+  // Only pump if we have drained enough to send a full batch
+  if (publishedCount - receivedCount > MAX_IN_FLIGHT - BATCH_SIZE) {
+    return;
   }
-  
-  console.log('[Benchmark] All published. Waiting for remaining acks/events...');
+
+  while (publishedCount - receivedCount < MAX_IN_FLIGHT && publishedCount < MSG_COUNT) {
+    sendTimes[publishedCount] = process.hrtime.bigint();
+    ws.send(JSON.stringify({
+      type: 'publish',
+      topic: TOPIC,
+      body: { seq: publishedCount }
+    }));
+    publishedCount++;
+  }
 }
 
 function finishBenchmark() {
@@ -76,16 +81,22 @@ function finishBenchmark() {
   const throughput = Math.round(MSG_COUNT / totalTimeSec);
 
   latencies.sort();
+  const min = latencies[0];
   const p50 = latencies[Math.floor(MSG_COUNT * 0.50)];
+  const p90 = latencies[Math.floor(MSG_COUNT * 0.90)];
   const p95 = latencies[Math.floor(MSG_COUNT * 0.95)];
   const p99 = latencies[Math.floor(MSG_COUNT * 0.99)];
+  const max = latencies[MSG_COUNT - 1];
 
   console.log('\n--- 📊 BENCHMARK RESULTS ---');
   console.log(`Total Time:  ${totalTimeSec.toFixed(2)} seconds`);
   console.log(`Throughput:  ${throughput.toLocaleString()} msg/sec`);
-  console.log(`p50 Latency: ${p50.toFixed(2)} ms`);
-  console.log(`p95 Latency: ${p95.toFixed(2)} ms`);
-  console.log(`p99 Latency: ${p99.toFixed(2)} ms`);
+  console.log(`Min Latency: ${min.toFixed(3)} ms`);
+  console.log(`p50 Latency: ${p50.toFixed(3)} ms`);
+  console.log(`p90 Latency: ${p90.toFixed(3)} ms`);
+  console.log(`p95 Latency: ${p95.toFixed(3)} ms`);
+  console.log(`p99 Latency: ${p99.toFixed(3)} ms`);
+  console.log(`Max Latency: ${max.toFixed(3)} ms`);
   console.log('----------------------------\n');
   
   process.exit(0);

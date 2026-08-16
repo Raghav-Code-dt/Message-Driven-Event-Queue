@@ -6,11 +6,7 @@ services:
       - "9099:9099"
     volumes:
       - ./data:/app/data
-    healthcheck:
-      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/9099"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+
     restart: unless-stopped
 
   gateway:
@@ -23,8 +19,16 @@ services:
       - TCP_PORT=9099
       - WS_PORT=8080
     depends_on:
-      broker:
-        condition: service_healthy
+      - broker
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+    ports:
+      - "5173:80"
+    depends_on:
+      - gateway
     restart: unless-stopped
 
   order-service:

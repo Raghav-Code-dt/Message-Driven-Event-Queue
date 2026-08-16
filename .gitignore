@@ -4,6 +4,7 @@ node_modules/
 
 # ── C++ Build artifacts ───────────────────────────────────────────────────────
 broker/build/
+broker/broker
 broker/*.exe
 *.exe
 *.o
@@ -12,6 +13,11 @@ broker/*.exe
 # ── Runtime data ──────────────────────────────────────────────────────────────
 data/
 *.wal
+broker/wal.log
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+dashboard/dist/
+dashboard/node_modules
 
 # ── Environment ───────────────────────────────────────────────────────────────
 .env
@@ -34,3 +40,6 @@ eventbus2/bus.exe
 eventbus/broker.exe
 eventbus2/broker.exe
 eventbus2/eventbus.exe
+
+# Gatway
+gatway/node_modules

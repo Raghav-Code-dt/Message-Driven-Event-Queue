@@ -14,17 +14,20 @@ static constexpr uint8_t WAL_ACK     = 0x02;
 
 // ── Big-Endian stream helpers ─────────────────────────────────────────────────
 
-void WalWriter::write_be64(std::ostream& out, uint64_t v) {
+void WalWriter::write_be64(std::vector<uint8_t>& out, uint64_t v) {
     uint64_t be = to_be64(v);
-    out.write(reinterpret_cast<const char*>(&be), 8);
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&be);
+    out.insert(out.end(), p, p + 8);
 }
-void WalWriter::write_be32(std::ostream& out, uint32_t v) {
+void WalWriter::write_be32(std::vector<uint8_t>& out, uint32_t v) {
     uint32_t be = to_be32(v);
-    out.write(reinterpret_cast<const char*>(&be), 4);
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&be);
+    out.insert(out.end(), p, p + 4);
 }
-void WalWriter::write_be16(std::ostream& out, uint16_t v) {
+void WalWriter::write_be16(std::vector<uint8_t>& out, uint16_t v) {
     uint16_t be = static_cast<uint16_t>((v >> 8) | (v << 8));
-    out.write(reinterpret_cast<const char*>(&be), 2);
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&be);
+    out.insert(out.end(), p, p + 2);
 }
 
 uint64_t WalWriter::read_be64(std::istream& in) {
@@ -46,21 +49,53 @@ uint16_t WalWriter::read_be16(std::istream& in) {
 // ── Constructor / Destructor ──────────────────────────────────────────────────
 
 WalWriter::WalWriter(const std::string& path) : path_(path) {
-    // Ensure parent directory exists
     std::filesystem::path p(path);
     if (p.has_parent_path()) {
         std::filesystem::create_directories(p.parent_path());
     }
-    // Open in binary append mode
     file_.open(path, std::ios::binary | std::ios::app);
     if (!file_.is_open())
         throw std::runtime_error("[WAL] Cannot open WAL file: " + path);
+
+    active_buf_.reserve(128 * 1024);
+    flush_buf_.reserve(128 * 1024);
+    flush_thread_ = std::thread(&WalWriter::flush_thread_loop, this);
 
     std::cout << "[WAL] Opened: " << path << "\n";
 }
 
 WalWriter::~WalWriter() {
+    running_ = false;
+    cv_.notify_all();
+    if (flush_thread_.joinable()) flush_thread_.join();
     if (file_.is_open()) file_.close();
+}
+
+// ── Background Flush Thread ───────────────────────────────────────────────────
+
+void WalWriter::flush_thread_loop() {
+    while (running_) {
+        {
+            std::unique_lock<std::mutex> lock(mu_);
+            cv_.wait_for(lock, std::chrono::milliseconds(5), [this] {
+                return !running_ || active_buf_.size() > 64 * 1024;
+            });
+
+            if (active_buf_.empty()) continue;
+            std::swap(active_buf_, flush_buf_);
+        }
+
+        file_.write(reinterpret_cast<const char*>(flush_buf_.data()), flush_buf_.size());
+        file_.flush();
+        flush_buf_.clear();
+    }
+
+    // Final flush on shutdown
+    std::unique_lock<std::mutex> lock(mu_);
+    if (!active_buf_.empty()) {
+        file_.write(reinterpret_cast<const char*>(active_buf_.data()), active_buf_.size());
+        file_.flush();
+    }
 }
 
 // ── Append a PUBLISH record ───────────────────────────────────────────────────
@@ -71,22 +106,24 @@ void WalWriter::append(const Message& msg) {
     auto topic_len = static_cast<uint16_t>(msg.topic.size());
     auto body_len  = static_cast<uint32_t>(msg.body.size());
 
-    file_.put(static_cast<char>(WAL_PUBLISH));
-    write_be64(file_, msg.msg_id);
-    write_be16(file_, topic_len);
-    file_.write(msg.topic.data(), topic_len);
-    write_be32(file_, body_len);
-    file_.write(reinterpret_cast<const char*>(msg.body.data()), body_len);
-    file_.flush();
+    active_buf_.push_back(WAL_PUBLISH);
+    write_be64(active_buf_, msg.msg_id);
+    write_be16(active_buf_, topic_len);
+    active_buf_.insert(active_buf_.end(), msg.topic.begin(), msg.topic.end());
+    write_be32(active_buf_, body_len);
+    active_buf_.insert(active_buf_.end(), msg.body.begin(), msg.body.end());
+
+    if (active_buf_.size() > 64 * 1024) cv_.notify_one();
 }
 
 // ── Append an ACK record ──────────────────────────────────────────────────────
 
 void WalWriter::acknowledge(uint64_t msg_id) {
     std::lock_guard<std::mutex> lock(mu_);
-    file_.put(static_cast<char>(WAL_ACK));
-    write_be64(file_, msg_id);
-    file_.flush();
+    active_buf_.push_back(WAL_ACK);
+    write_be64(active_buf_, msg_id);
+    
+    if (active_buf_.size() > 64 * 1024) cv_.notify_one();
 }
 
 // ── Replay: push unacknowledged messages back into SafeQueue ──────────────────

@@ -58,22 +58,33 @@ int main() {
         MAX_RETRIES
     );
 
+    // ── Monotonic message ID counter ─────────────────────────────────────
+    static std::atomic<uint64_t> next_id{1};
+
     // ── DLQ logger thread ─────────────────────────────────────────────────
-    // In production this could forward to a monitoring topic.
     std::thread dlq_logger([&]() {
         while (g_running) {
             auto opt = dlq.try_pop_for(std::chrono::milliseconds(200));
             if (!opt) continue;
             std::cout << "[DLQ] Dead-lettered msg_id=" << opt->msg_id
                       << " topic=" << opt->topic << "\n";
+                      
+            // Re-publish the DLQ event so monitoring dashboards can see it
+            Message sys_msg;
+            sys_msg.msg_id = next_id.fetch_add(1);
+            sys_msg.topic = "$SYS.dlq";
+            
+            std::string body_str = "{\"original_id\": \"" + std::to_string(opt->msg_id) + 
+                                   "\", \"original_topic\": \"" + opt->topic + "\"}";
+            sys_msg.body.assign(body_str.begin(), body_str.end());
+            
+            wal.append(sys_msg);
+            main_queue.push(std::move(sys_msg));
         }
     });
 
     // ── Forward-declare server pointer so on_frame lambda can capture it ─
     std::shared_ptr<TcpServer> server_ptr;
-
-    // ── Monotonic message ID counter ─────────────────────────────────────
-    static std::atomic<uint64_t> next_id{1};
 
     // ── Frame handler: called by TcpServer for every complete parsed frame ─
     auto on_frame = [&](ClientId id,
@@ -101,9 +112,9 @@ int main() {
             msg.topic  = pub.topic;
             msg.body   = pub.body;
 
-            std::cout << "[Broker] PUBLISH id=" << id
-                      << " topic=" << msg.topic
-                      << " msg_id=" << msg.msg_id << "\n";
+            // std::cout << "[Broker] PUBLISH id=" << id
+            //           << " topic=" << msg.topic
+            //           << " msg_id=" << msg.msg_id << "\n";
 
             wal.append(msg);           // Persist before queuing
             main_queue.push(std::move(msg));
@@ -111,7 +122,7 @@ int main() {
         }
 
         case MessageType::ACK: {
-            std::cout << "[Broker] ACK id=" << id << " msg_id=" << msg_id << "\n";
+            // std::cout << "[Broker] ACK id=" << id << " msg_id=" << msg_id << "\n";
             ack_engine.ack(msg_id);
             wal.acknowledge(msg_id);   // Mark as processed in WAL
             break;

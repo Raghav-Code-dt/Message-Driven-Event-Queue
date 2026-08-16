@@ -5,7 +5,7 @@ WORKDIR /build
 COPY include/ ./include/
 COPY src/     ./src/
 
-RUN g++ -std=c++20 -I include -O2 -Wall \
+RUN g++ -std=c++20 -I include -O3 -DNDEBUG -Wall \
     src/TopicRouter.cpp \
     src/TcpServer.cpp   \
     src/AckEngine.cpp   \
@@ -17,18 +17,15 @@ RUN g++ -std=c++20 -I include -O2 -Wall \
 # ── Stage 2: Minimal runtime ──────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-RUN useradd -r -u 1001 broker
 WORKDIR /app
-RUN mkdir -p data && chown broker:broker data
+RUN mkdir -p data
 
 COPY --from=builder /build/broker ./broker
 
-USER broker
-
 EXPOSE 9099
 
-HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-  CMD bash -c 'echo > /dev/tcp/localhost/9099' 2>/dev/null && echo OK || exit 1
+# Use a simpler healthcheck or just let the gateway reconnect logic handle it
+HEALTHCHECK NONE
 
 ENV TCP_PORT=9099 \
     QUEUE_CAPACITY=10000 \

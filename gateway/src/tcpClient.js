@@ -23,12 +23,14 @@ export class TcpClient extends EventEmitter {
   #host;
   #port;
   #socket      = null;
-  #readBuf     = Buffer.allocUnsafe(0);
+  #readBuf     = Buffer.allocUnsafe(2 * 1024 * 1024); // 2MB pre-allocated
+  #readLen     = 0;
   #outQueue    = [];           // frames pending while disconnected
   #connected   = false;
   #delay       = RECONNECT_MIN_MS;
   #hbTimer     = null;
   #stopping    = false;
+  #corkTimer   = null;
 
   constructor(host, port) {
     super();
@@ -42,6 +44,7 @@ export class TcpClient extends EventEmitter {
     this.#socket = net.createConnection({ host: this.#host, port: this.#port });
 
     this.#socket.on('connect', () => {
+      this.#socket.setNoDelay(true); // TCP_NODELAY for predictable latency
       this.#connected = true;
       this.#delay     = RECONNECT_MIN_MS; // reset backoff
       console.log(`[TCP] Connected to broker at ${this.#host}:${this.#port}`);
@@ -49,19 +52,25 @@ export class TcpClient extends EventEmitter {
 
       // Flush queued frames
       for (const frame of this.#outQueue) {
-        this.#socket.write(frame);
+        this.send(frame);
       }
       this.#outQueue = [];
 
       // Heartbeat to keep connection alive
       this.#hbTimer = setInterval(() => {
-        if (this.#connected) this.#socket.write(encodeHeartbeat());
+        if (this.#connected) this.send(encodeHeartbeat());
       }, HEARTBEAT_MS);
     });
 
     this.#socket.on('data', (chunk) => {
-      // Strict Buffer accumulation — never coerce to string
-      this.#readBuf = Buffer.concat([this.#readBuf, chunk]);
+      // Zero-copy framing accumulation
+      if (this.#readLen + chunk.length > this.#readBuf.length) {
+         const newBuf = Buffer.allocUnsafe(Math.max(this.#readBuf.length * 2, this.#readLen + chunk.length));
+         this.#readBuf.copy(newBuf, 0, 0, this.#readLen);
+         this.#readBuf = newBuf;
+      }
+      chunk.copy(this.#readBuf, this.#readLen);
+      this.#readLen += chunk.length;
       this.#parseFrames();
     });
 
@@ -70,7 +79,6 @@ export class TcpClient extends EventEmitter {
     });
 
     this.#socket.on('error', (err) => {
-      // 'close' will follow, so just log here
       console.error('[TCP] Socket error:', err.message);
     });
   }
@@ -81,9 +89,16 @@ export class TcpClient extends EventEmitter {
       throw new TypeError('[TCP] send() requires a Buffer');
 
     if (this.#connected && this.#socket) {
+      this.#socket.cork(); // Buffer writes at the application level
       this.#socket.write(frame);
+      
+      if (!this.#corkTimer) {
+        this.#corkTimer = process.nextTick(() => {
+          this.#socket.uncork(); // Flush the batched frames as one TCP packet
+          this.#corkTimer = null;
+        });
+      }
     } else {
-      // Queue while disconnected — hard cap to prevent unbounded growth
       if (this.#outQueue.length < 10_000) {
         this.#outQueue.push(frame);
       } else {
@@ -103,8 +118,9 @@ export class TcpClient extends EventEmitter {
   // ── Private ────────────────────────────────────────────────────────────────
 
   #parseFrames() {
-    while (this.#readBuf.length >= HEADER_SIZE) {
-      const header = decodeHeader(this.#readBuf);
+    let offset = 0;
+    while (this.#readLen - offset >= HEADER_SIZE) {
+      const header = decodeHeader(this.#readBuf.subarray(offset));
 
       if (!header.valid) {
         console.error('[TCP] Bad magic byte — dropping connection');
@@ -113,20 +129,27 @@ export class TcpClient extends EventEmitter {
       }
 
       const totalSize = HEADER_SIZE + header.payloadLen;
-      if (this.#readBuf.length < totalSize) break; // Wait for more bytes
+      if (this.#readLen - offset < totalSize) break; // Wait for more bytes
 
-      // Extract payload as a slice (no string conversion)
-      const payload = this.#readBuf.slice(HEADER_SIZE, totalSize);
+      // EventEmitter is synchronous. This subarray view is consumed instantly by wsServer.
+      const payload = this.#readBuf.subarray(offset + HEADER_SIZE, offset + totalSize);
+      offset += totalSize;
 
-      // Consume processed bytes
-      this.#readBuf = this.#readBuf.slice(totalSize);
-
-      // Emit the parsed frame to wsServer
       this.emit('frame', {
         type:    header.type,
-        msgId:   header.msgId,   // BigInt
-        payload,                  // raw Buffer
+        msgId:   header.msgId,
+        payload,
       });
+    }
+
+    if (offset > 0) {
+      if (offset === this.#readLen) {
+        this.#readLen = 0; // consumed everything
+      } else {
+        // Shift remaining bytes
+        this.#readBuf.copy(this.#readBuf, 0, offset, this.#readLen);
+        this.#readLen -= offset;
+      }
     }
   }
 
