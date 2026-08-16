@@ -17,7 +17,6 @@ broker/wal.log
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 dashboard/dist/
-dashboard/node_modules
 
 # ── Environment ───────────────────────────────────────────────────────────────
 .env
@@ -28,18 +27,3 @@ dashboard/node_modules
 .vscode/settings.json
 .DS_Store
 Thumbs.db
-
-# ── C++ vendor headers (gitignored per original .gitignore) ──────────────────
-eventbus/include/httplib.h
-eventbus/include/json.hpp
-eventbus2/include/json.hpp
-eventbus2/include/httplib.h
-
-# ── Legacy binaries ───────────────────────────────────────────────────────────
-eventbus2/bus.exe
-eventbus/broker.exe
-eventbus2/broker.exe
-eventbus2/eventbus.exe
-
-# Gatway
-gatway/node_modules
