@@ -81,6 +81,19 @@ npm run start -w mq-benchmarks
   - Explicit `TCP_NODELAY` and scaled socket buffers (256KB) eliminate kernel queueing spikes.
   - Aggregated backpressure telemetry protects downstream Dashboard WebSockets.
 
+## Wire Protocol Specification
+
+The C++ Broker and Node.js Gateway communicate using a custom length-prefixed binary TCP protocol. Every frame starts with a fixed **17-byte header**:
+
+| Offset | Size (Bytes) | Type | Description |
+|--------|-------------|------|-------------|
+| 0 | 4 | `uint32_t` | **Total Frame Length** (excluding this 4-byte field). Used for stream framing. |
+| 4 | 1 | `uint8_t` | **Message Type** (0=SUBSCRIBE, 1=PUBLISH, 2=EVENT_DATA, 3=ACK, 4=NACK, 5=HEARTBEAT) |
+| 5 | 8 | `uint64_t` | **Message ID**. Auto-incrementing identifier for ACKs/NACKs and Idempotency. |
+| 13 | 4 | `uint32_t` | **Topic Length**. Number of bytes in the topic string. |
+| 17 | `var` | `string` | **Topic**. The UTF-8 string topic (e.g. `order.created`). |
+| 17 + len | `var` | `bytes` | **Payload**. The actual JSON payload or raw bytes. |
+
 ## Microservices Simulation
 
 The repository includes a simulated e-commerce backend built on top of the pub-sub engine to demonstrate real-world usage:
@@ -90,3 +103,17 @@ The repository includes a simulated e-commerce backend built on top of the pub-s
 3. **Notification Service:** Subscribes to `payment.*`, ACKs the message, and increments its success counters.
 
 If any service crashes mid-flight, the broker's `AckEngine` will wait 5 seconds and automatically redeliver the message. If the message fails 3 times, it is routed to the Dead-Letter Queue (DLQ) and published as a `$SYS.dlq` event to the dashboard.
+
+## Project Checklist
+
+- [x] 1. C++20 Core MPMC Queue & Topic Router
+- [x] 2. 17-Byte Binary Length-Prefixed Wire Protocol & TCP Server
+- [x] 3. Asynchronous Double-Buffered Write-Ahead Log (WAL)
+- [x] 4. At-Least-Once Delivery Semantics (ACK / Timeout / DLQ Engine)
+- [x] 5. High-Performance Sliding-Window Benchmark (22.8k msg/sec)
+- [x] 6. Native WebSocket Gateway & React Dashboard Connection
+- [x] 7. Automated Chaos & Fault-Tolerance Demo Script (High Interview Impact)
+- [x] 8. Docker Compose One-Command Orchestration (`docker-compose up`)
+- [x] 9. Repository Cleanup (Purge legacy folders & committed node_modules)
+- [x] 10. Polished GitHub README (Architecture diagrams, wire specs, benchmarks)
+- [x] 11. GitHub Actions CI (Sanitizers & automated build validation)

@@ -25,6 +25,7 @@ struct Message {
     uint64_t             msg_id{0};
     std::string          topic;
     std::vector<uint8_t> body; // raw JSON bytes
+    int                  retry_count{0};
 };
 
 } // namespace broker

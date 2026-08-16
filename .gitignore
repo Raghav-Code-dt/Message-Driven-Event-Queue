@@ -3,7 +3,7 @@ node_modules/
 .npm/
 
 # ── C++ Build artifacts ───────────────────────────────────────────────────────
-broker/build/
+build/
 broker/broker
 broker/*.exe
 *.exe

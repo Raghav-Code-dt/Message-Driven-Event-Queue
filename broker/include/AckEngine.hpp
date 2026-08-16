@@ -1,6 +1,6 @@
 #pragma once
 
-#include <unordered_map>
+#include <map>
 #include <chrono>
 #include <mutex>
 #include <atomic>
@@ -33,10 +33,10 @@ public:
     void track(const Message& msg, ClientId subscriber_id);
 
     // Called when a client sends an ACK frame.
-    void ack(uint64_t msg_id);
+    void ack(uint64_t msg_id, ClientId id);
 
     // Called when a client sends a NACK frame — immediately requeues.
-    void nack(uint64_t msg_id);
+    void nack(uint64_t msg_id, ClientId id);
 
     // Called when a client disconnects — fail all its in-flight messages.
     void client_disconnected(ClientId id);
@@ -51,10 +51,12 @@ private:
     SafeQueue<Message>&                     dlq_;
     std::chrono::milliseconds               ack_timeout_;
     int                                     max_retries_;
-    std::unordered_map<uint64_t, InFlight>  in_flight_;
+    
+    // Keyed by {msg_id, client_id} to track independent deliveries
+    std::map<std::pair<uint64_t, ClientId>, InFlight> in_flight_;
     
     using TimePoint = std::chrono::steady_clock::time_point;
-    using DeadlineEntry = std::pair<TimePoint, uint64_t>;
+    using DeadlineEntry = std::pair<TimePoint, std::pair<uint64_t, ClientId>>;
     std::priority_queue<DeadlineEntry, std::vector<DeadlineEntry>, std::greater<DeadlineEntry>> deadlines_;
 
     std::mutex                              mu_;

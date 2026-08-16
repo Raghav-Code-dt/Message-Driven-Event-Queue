@@ -69,13 +69,22 @@ int main() {
             std::cout << "[DLQ] Dead-lettered msg_id=" << opt->msg_id
                       << " topic=" << opt->topic << "\n";
                       
-            // Re-publish the DLQ event so monitoring dashboards can see it
+            // 1) Re-publish the real DLQ event so it reaches subscribers
+            main_queue.push(*opt);
+            
+            // 2) Publish the audit $SYS.dlq event for monitoring dashboards
             Message sys_msg;
             sys_msg.msg_id = next_id.fetch_add(1);
             sys_msg.topic = "$SYS.dlq";
             
+            // Extract the traceId from the original JSON payload if possible
+            // For now, just include the whole body string or the traceId explicitly
+            std::string orig_body(opt->body.begin(), opt->body.end());
+            
             std::string body_str = "{\"original_id\": \"" + std::to_string(opt->msg_id) + 
-                                   "\", \"original_topic\": \"" + opt->topic + "\"}";
+                                   "\", \"original_topic\": \"" + opt->topic + "\"" +
+                                   ", \"original_body\": " + (orig_body.empty() ? "{}" : orig_body) + "}";
+                                   
             sys_msg.body.assign(body_str.begin(), body_str.end());
             
             wal.append(sys_msg);
@@ -123,14 +132,14 @@ int main() {
 
         case MessageType::ACK: {
             // std::cout << "[Broker] ACK id=" << id << " msg_id=" << msg_id << "\n";
-            ack_engine.ack(msg_id);
+            ack_engine.ack(msg_id, id);
             wal.acknowledge(msg_id);   // Mark as processed in WAL
             break;
         }
 
         case MessageType::NACK: {
             std::cout << "[Broker] NACK id=" << id << " msg_id=" << msg_id << "\n";
-            ack_engine.nack(msg_id);
+            ack_engine.nack(msg_id, id);
             break;
         }
 

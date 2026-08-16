@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up GCC & CMake
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential g++
+
+    - name: Build C++ Broker (Release)
+      working-directory: ./broker
+      run: |
+        mkdir -build
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Release -Wall -Wextra -Werror ..
+        make -j4
+
+    - name: Build C++ Broker (Sanitizers)
+      working-directory: ./broker
+      run: |
+        mkdir -p build-san
+        cd build-san
+        cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON -DENABLE_TSAN=ON -Wall -Wextra -Werror ..
+        make -j4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+
+    - name: Install Node Dependencies
+      run: npm install
+
+    - name: Run Node Tests
+      run: npm test --if-present

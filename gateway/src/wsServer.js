@@ -81,6 +81,10 @@ export class WsServer {
 
     this.#tcp.on('connect', () => {
       this.#broadcastStatus('connected');
+      // Resubscribe all active topics to the broker on reconnect
+      for (const topic of this.#topicClients.keys()) {
+        this.#tcp.send(encodeSubscribe(topic, '')); 
+      }
     });
 
     this.#tcp.on('disconnect', () => {
@@ -182,8 +186,8 @@ export class WsServer {
   #dispatchEvent(topic, msgId, body) {
     const idStr = msgId.toString();
 
-    // Idempotency check: drop duplicate packages, bypass for telemetry
-    if (topic !== '$SYS.stats') {
+    // Idempotency check: drop duplicate packages, bypass for telemetry, DLQ, and chaos tests
+    if (!topic.startsWith('$SYS.') && !topic.startsWith('$DLQ.') && !topic.startsWith('chaos.')) {
       if (this.#recentMsgIds.has(idStr)) return;
 
       if (this.#ringCount === 50000) {

@@ -29,27 +29,27 @@ void AckEngine::stop() {
 void AckEngine::track(const Message& msg, ClientId subscriber_id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto deadline = std::chrono::steady_clock::now() + ack_timeout_;
-    in_flight_[msg.msg_id] = InFlight{
+    in_flight_[{msg.msg_id, subscriber_id}] = InFlight{
         msg,
         subscriber_id,
         deadline,
-        0
+        msg.retry_count
     };
-    deadlines_.push({deadline, msg.msg_id});
+    deadlines_.push({deadline, {msg.msg_id, subscriber_id}});
 }
 
-void AckEngine::ack(uint64_t msg_id) {
+void AckEngine::ack(uint64_t msg_id, ClientId id) {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = in_flight_.find(msg_id);
+    auto it = in_flight_.find({msg_id, id});
     if (it != in_flight_.end()) {
         // std::cout << "[AckEngine] ACK msg_id=" << msg_id << "\n";
         in_flight_.erase(it);
     }
 }
 
-void AckEngine::nack(uint64_t msg_id) {
+void AckEngine::nack(uint64_t msg_id, ClientId id) {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = in_flight_.find(msg_id);
+    auto it = in_flight_.find({msg_id, id});
     if (it == in_flight_.end()) return;
 
     std::cout << "[AckEngine] NACK msg_id=" << msg_id
@@ -64,7 +64,7 @@ void AckEngine::client_disconnected(ClientId id) {
     for (auto it = in_flight_.begin(); it != in_flight_.end(); ) {
         if (it->second.subscriber_id == id) {
             std::cout << "[AckEngine] Client " << id
-                      << " disconnected, requeueing msg_id=" << it->first << "\n";
+                      << " disconnected, requeueing msg_id=" << it->first.first << "\n";
             requeue_or_dlq(it->second);
             it = in_flight_.erase(it);
         } else {
@@ -87,6 +87,7 @@ void AckEngine::requeue_or_dlq(InFlight& entry) {
         entry.retry_count++;
         entry.deadline = std::chrono::steady_clock::now() + ack_timeout_;
         Message requeue_msg = entry.msg;
+        requeue_msg.retry_count = entry.retry_count; // Preserve retry count!
         // std::cout << "[AckEngine] Requeue msg_id=" << requeue_msg.msg_id << " attempt=" << entry.retry_count << "\n";
         main_queue_.push(std::move(requeue_msg));
     }
@@ -105,10 +106,11 @@ void AckEngine::redelivery_loop() {
             auto top = deadlines_.top();
             if (top.first > now) break; // Earliest deadline is in the future
 
-            uint64_t msg_id = top.second;
+            uint64_t msg_id = top.second.first;
+            ClientId client_id = top.second.second;
             deadlines_.pop();
 
-            auto it = in_flight_.find(msg_id);
+            auto it = in_flight_.find({msg_id, client_id});
             if (it == in_flight_.end()) {
                 // Lazy deletion: Message was already ACKed or removed
                 continue;
@@ -119,7 +121,7 @@ void AckEngine::redelivery_loop() {
                 continue;
             }
 
-            // std::cout << "[AckEngine] Timeout msg_id=" << it->first << " retry=" << it->second.retry_count << "\n";
+            // std::cout << "[AckEngine] Timeout msg_id=" << it->first.first << " retry=" << it->second.retry_count << "\n";
             requeue_or_dlq(it->second);
             in_flight_.erase(it);
         }

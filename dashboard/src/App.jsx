@@ -3,7 +3,7 @@ import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer
 } from "recharts";
 
-const GATEWAY_WS = "ws://localhost:8080";
+const GATEWAY_WS = import.meta.env.VITE_GATEWAY_WS || "ws://localhost:8080";
 
 export default function App() {
   const [events, setEvents] = useState([]);
@@ -202,7 +202,7 @@ export default function App() {
             <div className="flex-1 flex flex-col justify-center space-y-4">
               <FlowStep label="Published to Gateway" active={testFlowState !== "IDLE"} />
               <FlowStep label="Broker Delivered" active={["DELIVERED", "ACKED", "DELIVERED_NACK", "DLQ"].includes(testFlowState)} 
-                meta={testRetries > 0 ? `(Attempt ${testRetries}/5)` : null} />
+                meta={testRetries > 0 ? `(Attempt ${testRetries}/3)` : null} />
               
               {testFlowState === "DELIVERED_NACK" || testFlowState === "DLQ" ? (
                 <FlowStep label="Moved to Dead Letter Queue" active={testFlowState === "DLQ"} color="red" />
