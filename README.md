@@ -12,6 +12,8 @@ This repository demonstrates systems-level engineering concepts including:
 
 ## Architecture
 
+![Project Architecture](doc/event_queue_architecture.png)
+
 ```
 [ Browser Dashboard ]   [ Microservices (Order / Payment / Notification) ]
          ^                               ^
