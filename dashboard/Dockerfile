@@ -13,4 +13,4 @@ RUN npm install -g serve
 COPY package.json ./
 COPY --from=builder /app/dist ./dist
 # Railway provides the PORT environment variable natively
-CMD ["sh", "-c", "serve -s dist -l ${PORT:-80}"]
+CMD ["sh", "-c", "serve -s dist -l tcp://0.0.0.0:${PORT:-80}"]
