@@ -10,6 +10,7 @@ RUN npm run build
 FROM node:20-alpine
 WORKDIR /app
 RUN npm install -g serve
+COPY package.json ./
 COPY --from=builder /app/dist ./dist
 # Railway provides the PORT environment variable natively
 CMD ["sh", "-c", "serve -s dist -l ${PORT:-80}"]
